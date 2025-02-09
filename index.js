@@ -91,10 +91,10 @@ app.get('/url', (req, res) => {
         // Gestion spéciale pour les erreurs 404 et 503
         if (remoteResponse.statusCode === 404 || remoteResponse.statusCode === 503) {
           fatalErrorRetryCount++;
-          if (fatalErrorRetryCount >= 3) {
-            console.error(`Erreur ${remoteResponse.statusCode} persistante après 3 tentatives, abandon.`);
+          if (fatalErrorRetryCount >= 2) {
+            console.error(`Erreur ${remoteResponse.statusCode} persistante après 2 tentatives, abandon.`);
             if (!res.headersSent) {
-              res.status(remoteResponse.statusCode).send(`Erreur ${remoteResponse.statusCode} persistante après 3 tentatives.`);
+              res.status(remoteResponse.statusCode).send(`Erreur ${remoteResponse.statusCode} persistante après 2 tentatives.`);
             }
             streamingTermine = true;
             return;
