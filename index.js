@@ -38,6 +38,7 @@ app.get('/url', (req, res) => {
   const totalStart = clientRangeStart;  // point de départ initial (pour le seeking)
   let streamingTermine = false;
   let redirectRetryCount = 0; // Compteur de tentatives sur l'URL de redirection
+  let fatalErrorRetryCount = 0; // Compteur pour les erreurs 404 et 503
 
   /**
    * Fonction qui lance la requête HTTP(S) vers la source à partir d'un offset donné.
@@ -53,6 +54,7 @@ app.get('/url', (req, res) => {
       console.log('Trop de tentatives sur l\'URL de redirection, retour à l\'URL de base');
       sourceUrl = baseUrl;
       redirectRetryCount = 0;
+      fatalErrorRetryCount = 0; // Réinitialiser aussi le compteur d'erreurs fatales
     }
 
     // Préparer les options de la requête vers l'URL source
@@ -85,6 +87,20 @@ app.get('/url', (req, res) => {
       // Vérifier le code de statut de la réponse distante et relancer en cas d'erreur
       if (remoteResponse.statusCode && (remoteResponse.statusCode < 200 || remoteResponse.statusCode >= 300) && remoteResponse.statusCode !== 206) {
         console.error(`Erreur de la réponse distante : ${remoteResponse.statusCode}, nouvelle tentative dans 1 seconde...`);
+        
+        // Gestion spéciale pour les erreurs 404 et 503
+        if (remoteResponse.statusCode === 404 || remoteResponse.statusCode === 503) {
+          fatalErrorRetryCount++;
+          if (fatalErrorRetryCount >= 3) {
+            console.error(`Erreur ${remoteResponse.statusCode} persistante après 3 tentatives, abandon.`);
+            if (!res.headersSent) {
+              res.status(remoteResponse.statusCode).send(`Erreur ${remoteResponse.statusCode} persistante après 3 tentatives.`);
+            }
+            streamingTermine = true;
+            return;
+          }
+        }
+
         if (!streamingTermine) {
           if (sourceUrl !== baseUrl) {
             redirectRetryCount++;
