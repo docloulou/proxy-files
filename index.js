@@ -11,6 +11,19 @@ const app = express();
 const TIMEOUT_CONNEXION = 30000; // 30 secondes
 const TIMEOUT_SOCKET = 60000;    // 60 secondes
 
+// Système de suivi des connexions actives
+const connectionsActives = new Map();
+let connectionCounter = 0;
+
+function logConnectionsActives() {
+  console.log('\n=== État des connexions ===');
+  console.log(`Nombre total de connexions actives: ${connectionsActives.size}`);
+  connectionsActives.forEach((info, id) => {
+    console.log(`[ID: ${id}] URL: ${info.url} | Bytes transmis: ${info.bytesTransmis} | Durée: ${Math.floor((Date.now() - info.startTime)/1000)}s`);
+  });
+  console.log('========================\n');
+}
+
 // Configuration du serveur pour éviter les fuites de mémoire
 app.set('keepAliveTimeout', TIMEOUT_CONNEXION);
 app.set('headersTimeout', TIMEOUT_SOCKET);
@@ -21,6 +34,18 @@ app.set('headersTimeout', TIMEOUT_SOCKET);
  * http://<ip-de-votre-service-tampon>:3000/url?url=<url_source_du_strm>
  */
 app.get('/url', (req, res) => {
+  const connectionId = ++connectionCounter;
+  const startTime = Date.now();
+  
+  // Ajouter la nouvelle connexion au suivi
+  connectionsActives.set(connectionId, {
+    url: req.query.url,
+    bytesTransmis: 0,
+    startTime: startTime
+  });
+  
+  logConnectionsActives();
+
   // Configurer les timeouts de la réponse
   res.setTimeout(TIMEOUT_SOCKET, () => {
     console.log('Timeout de la réponse atteint');
@@ -160,6 +185,12 @@ app.get('/url', (req, res) => {
         }
 
         bytesTransmis += chunk.length;
+        // Mettre à jour les bytes transmis dans le suivi
+        if (connectionsActives.has(connectionId)) {
+          connectionsActives.get(connectionId).bytesTransmis = bytesTransmis;
+          connectionsActives.get(connectionId).url = sourceUrl; // Met à jour l'URL en cas de redirection
+        }
+        
         const ok = res.write(chunk);
         if (!ok) {
           remoteResponse.pause();
@@ -176,6 +207,9 @@ app.get('/url', (req, res) => {
         console.log('Transmission terminée depuis la source.');
         streamingTermine = true;
         remoteResponse.destroy();
+        // Supprimer la connexion du suivi
+        connectionsActives.delete(connectionId);
+        logConnectionsActives();
         res.end();
       });
 
@@ -220,6 +254,9 @@ app.get('/url', (req, res) => {
   req.on('close', () => {
     console.log('Client déconnecté, nettoyage des ressources');
     streamingTermine = true;
+    // Supprimer la connexion du suivi
+    connectionsActives.delete(connectionId);
+    logConnectionsActives();
     if (!res.headersSent) {
       res.end();
     }
@@ -228,6 +265,9 @@ app.get('/url', (req, res) => {
   // Lancer la première requête à partir de l'offset initial
   lancerRequete(totalStart);
 });
+
+// Afficher périodiquement l'état des connexions
+setInterval(logConnectionsActives, 2000); // Toutes les 10 secondes
 
 // Démarrer le serveur sur le port 3000 (ou le port défini dans la variable d'environnement PORT)
 const PORT = process.env.PORT || 3000;
