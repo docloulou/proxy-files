@@ -7,12 +7,29 @@ const urlModule = require('url');
 
 const app = express();
 
+// Configuration des timeouts
+const TIMEOUT_CONNEXION = 30000; // 30 secondes
+const TIMEOUT_SOCKET = 60000;    // 60 secondes
+
+// Configuration du serveur pour éviter les fuites de mémoire
+app.set('keepAliveTimeout', TIMEOUT_CONNEXION);
+app.set('headersTimeout', TIMEOUT_SOCKET);
+
 /**
  * Point d'entrée pour la mise en tampon.
  * Emby doit appeler l'URL sous la forme :
  * http://<ip-de-votre-service-tampon>:3000/url?url=<url_source_du_strm>
  */
 app.get('/url', (req, res) => {
+  // Configurer les timeouts de la réponse
+  res.setTimeout(TIMEOUT_SOCKET, () => {
+    console.log('Timeout de la réponse atteint');
+    if (!res.headersSent) {
+      res.status(504).send('Gateway Timeout');
+    }
+    res.end();
+  });
+
   // Récupération de l'URL source passée en paramètre de requête
   let sourceUrl = req.query.url;
   const baseUrl = req.query.url; // Garder l'URL originale
@@ -76,6 +93,12 @@ app.get('/url', (req, res) => {
 
     // Lancer la requête vers la source
     const remoteRequest = protocol.get(sourceUrl, options, remoteResponse => {
+      // Configurer le timeout pour la réponse distante
+      remoteResponse.setTimeout(TIMEOUT_CONNEXION, () => {
+        console.log('Timeout de la réponse distante atteint');
+        remoteResponse.destroy();
+      });
+
       // Handle redirects (status codes 301, 302, 303, 307, 308)
       if (remoteResponse.statusCode >= 300 && remoteResponse.statusCode < 400 && remoteResponse.headers.location) {
         console.log(`Suivre la redirection vers: ${remoteResponse.headers.location}`);
@@ -131,13 +154,19 @@ app.get('/url', (req, res) => {
 
       // Transmission des données depuis la source vers le client (Emby)
       remoteResponse.on('data', chunk => {
+        if (streamingTermine) {
+          remoteResponse.destroy();
+          return;
+        }
+
         bytesTransmis += chunk.length;
         const ok = res.write(chunk);
         if (!ok) {
-          // Si le buffer de réponse est saturé, on suspend le flux jusqu'au drain
           remoteResponse.pause();
           res.once('drain', () => {
-            remoteResponse.resume();
+            if (!streamingTermine) {
+              remoteResponse.resume();
+            }
           });
         }
       });
@@ -146,12 +175,14 @@ app.get('/url', (req, res) => {
       remoteResponse.on('end', () => {
         console.log('Transmission terminée depuis la source.');
         streamingTermine = true;
+        remoteResponse.destroy();
         res.end();
       });
 
       // Gestion des erreurs sur le flux distant
       remoteResponse.on('error', err => {
         console.error('Erreur sur le stream distant :', err);
+        remoteResponse.destroy();
         if (!streamingTermine) {
           if (sourceUrl !== baseUrl) {
             redirectRetryCount++;
@@ -162,6 +193,12 @@ app.get('/url', (req, res) => {
           }, 1000);
         }
       });
+    });
+
+    // Configurer le timeout pour la requête
+    remoteRequest.setTimeout(TIMEOUT_CONNEXION, () => {
+      console.log('Timeout de la requête atteint');
+      remoteRequest.destroy();
     });
 
     // Gestion des erreurs sur la requête HTTP(S)
@@ -179,12 +216,25 @@ app.get('/url', (req, res) => {
     });
   }
 
+  // Nettoyer les ressources si le client se déconnecte
+  req.on('close', () => {
+    console.log('Client déconnecté, nettoyage des ressources');
+    streamingTermine = true;
+    if (!res.headersSent) {
+      res.end();
+    }
+  });
+
   // Lancer la première requête à partir de l'offset initial
   lancerRequete(totalStart);
 });
 
 // Démarrer le serveur sur le port 3000 (ou le port défini dans la variable d'environnement PORT)
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`Service tampon en écoute sur le port ${PORT}`);
 });
+
+// Configurer les timeouts du serveur
+server.keepAliveTimeout = TIMEOUT_CONNEXION;
+server.headersTimeout = TIMEOUT_SOCKET;
