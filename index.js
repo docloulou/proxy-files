@@ -34,12 +34,100 @@ const verifyApiKey = (req, res, next) => {
 };
 
 function logConnectionsActives() {
-  console.log('\n=== État des connexions ===');
-  console.log(`Nombre total de connexions actives: ${connectionsActives.size}`);
-  connectionsActives.forEach((info, id) => {
-    console.log(`[ID: ${id}] URL: ${info.url} | Bytes transmis: ${info.bytesTransmis} | Durée: ${Math.floor((Date.now() - info.startTime)/1000)}s`);
+  // Clear console before each refresh
+  console.clear();
+  
+  // Get current timestamp for calculations
+  const now = Date.now();
+  
+  // Calculate total bytes and average speed
+  let totalBytes = 0;
+  let totalSpeed = 0;
+  
+  connectionsActives.forEach(info => {
+    totalBytes += info.bytesTransmis;
+    const duration = Math.max(1, (now - info.startTime) / 1000);
+    totalSpeed += info.bytesTransmis / duration;
   });
-  console.log('========================\n');
+  
+  // Format total data
+  let totalVolumeStr = 'N/A';
+  if (totalBytes > 0) {
+    if (totalBytes > 1073741824) { // > 1GB
+      totalVolumeStr = `${(totalBytes / 1073741824).toFixed(2)} GB`;
+    } else if (totalBytes > 1048576) { // > 1MB
+      totalVolumeStr = `${(totalBytes / 1048576).toFixed(2)} MB`;
+    } else {
+      totalVolumeStr = `${(totalBytes / 1024).toFixed(2)} KB`;
+    }
+  }
+  
+  // Format total speed
+  let totalSpeedStr = 'N/A';
+  if (totalSpeed > 0) {
+    if (totalSpeed > 1048576) { // > 1MB/s
+      totalSpeedStr = `${(totalSpeed / 1048576).toFixed(2)} MB/s`;
+    } else {
+      totalSpeedStr = `${(totalSpeed / 1024).toFixed(2)} KB/s`;
+    }
+  }
+  
+  // Display server uptime
+  const uptime = Math.floor(process.uptime());
+  const uptimeHours = Math.floor(uptime / 3600);
+  const uptimeMinutes = Math.floor((uptime % 3600) / 60);
+  const uptimeSeconds = uptime % 60;
+  const uptimeStr = `${uptimeHours}h ${uptimeMinutes}m ${uptimeSeconds}s`;
+  
+  // Header with server stats
+  console.log('\n╔═════════════════════════════════════════════════════╗');
+  console.log('║             DASHBOARD STREAMING PROXY               ║');
+  console.log('╠═════════════════════════════════════════════════════╣');
+  console.log(`║ Connexions: ${connectionsActives.size.toString().padEnd(5)} │ Uptime: ${uptimeStr.padEnd(15)} ║`);
+  console.log(`║ Volume total: ${totalVolumeStr.padEnd(10)} │ Vitesse: ${totalSpeedStr.padEnd(12)} ║`);
+  console.log('╠═════════════════════════════════════════════════════╣');
+  
+  if (connectionsActives.size > 0) {
+    console.log('║ ID │ URL                  │ VITESSE  │ VOLUME   │ DURÉE  ║');
+    console.log('╠════╪══════════════════════╪══════════╪══════════╪════════╣');
+    
+    connectionsActives.forEach((info, id) => {
+      // Calculate transmission speed (bytes per second)
+      const dureeSeconds = Math.max(1, (now - info.startTime) / 1000);
+      const vitesse = info.bytesTransmis / dureeSeconds;
+      
+      // Format speed in appropriate units (KB/s or MB/s)
+      let vitesseStr;
+      if (vitesse > 1048576) { // > 1MB/s
+        vitesseStr = `${(vitesse / 1048576).toFixed(2)} MB/s`;
+      } else {
+        vitesseStr = `${(vitesse / 1024).toFixed(2)} KB/s`;
+      }
+      
+      // Format total data in appropriate units
+      let volumeStr;
+      if (info.bytesTransmis > 1073741824) { // > 1GB
+        volumeStr = `${(info.bytesTransmis / 1073741824).toFixed(2)} GB`;
+      } else if (info.bytesTransmis > 1048576) { // > 1MB
+        volumeStr = `${(info.bytesTransmis / 1048576).toFixed(2)} MB`;
+      } else {
+        volumeStr = `${(info.bytesTransmis / 1024).toFixed(2)} KB`;
+      }
+      
+      // Format duration
+      const minutes = Math.floor(dureeSeconds / 60);
+      const seconds = Math.floor(dureeSeconds % 60);
+      const dureeStr = minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
+      
+      // Shorten URL if too long
+      const shortUrl = info.url.length > 20 ? info.url.substring(0, 17) + '...' : info.url;
+      
+      console.log(`║ ${id.toString().padEnd(2)} │ ${shortUrl.padEnd(20)} │ ${vitesseStr.padEnd(8)} │ ${volumeStr.padEnd(8)} │ ${dureeStr.padEnd(6)} ║`);
+    });
+  } else {
+    console.log('║           Aucune connexion active                    ║');
+  }
+  console.log('╚═════════════════════════════════════════════════════╝');
 }
 
 // Configuration du serveur pour éviter les fuites de mémoire
@@ -294,7 +382,7 @@ app.get('/url', verifyApiKey, (req, res) => {
 });
 
 // Afficher périodiquement l'état des connexions
-setInterval(logConnectionsActives, 2000); // Toutes les 10 secondes
+setInterval(logConnectionsActives, 2000); // Toutes les 2 secondes
 
 // Démarrer le serveur sur le port 3000 (ou le port défini dans la variable d'environnement PORT)
 const PORT = process.env.PORT || 3000;
