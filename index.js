@@ -4,6 +4,9 @@ const express = require('express');
 const http = require('http');
 const https = require('https');
 const urlModule = require('url');
+const dotenv = require('dotenv');
+
+dotenv.config();
 
 const app = express();
 
@@ -11,9 +14,24 @@ const app = express();
 const TIMEOUT_CONNEXION = 30000; // 30 secondes
 const TIMEOUT_SOCKET = 60000;    // 60 secondes
 
+// Clé API pour la sécurité
+const API_KEY = process.env.API_KEY || 'default_key_for_dev';
+
 // Système de suivi des connexions actives
 const connectionsActives = new Map();
 let connectionCounter = 0;
+
+// Middleware pour vérifier la clé API
+const verifyApiKey = (req, res, next) => {
+  const providedKey = req.query.key;
+  
+  if (!providedKey || providedKey !== API_KEY) {
+    console.log('Tentative d\'accès non autorisée: clé API invalide ou manquante');
+    return res.status(401).send('Accès non autorisé: clé API invalide ou manquante');
+  }
+  
+  next();
+};
 
 function logConnectionsActives() {
   console.log('\n=== État des connexions ===');
@@ -28,12 +46,21 @@ function logConnectionsActives() {
 app.set('keepAliveTimeout', TIMEOUT_CONNEXION);
 app.set('headersTimeout', TIMEOUT_SOCKET);
 
+// Route de health check (sans authentification)
+app.get('/health', (req, res) => {
+  res.status(200).json({
+    status: 'UP',
+    connections: connectionsActives.size,
+    uptime: Math.floor(process.uptime())
+  });
+});
+
 /**
  * Point d'entrée pour la mise en tampon.
  * Emby doit appeler l'URL sous la forme :
- * http://<ip-de-votre-service-tampon>:3000/url?url=<url_source_du_strm>
+ * http://<ip-de-votre-service-tampon>:3000/url?url=<url_source_du_strm>&key=<votre_api_key>
  */
-app.get('/url', (req, res) => {
+app.get('/url', verifyApiKey, (req, res) => {
   const connectionId = ++connectionCounter;
   const startTime = Date.now();
   
