@@ -254,8 +254,8 @@ app.get('/url', verifyApiKey, (req, res) => {
         // Gestion spéciale pour les erreurs 404 et 503
         if (remoteResponse.statusCode === 404 || remoteResponse.statusCode === 503) {
           fatalErrorRetryCount++;
-          if (fatalErrorRetryCount >= 2) {
-            console.error(`Erreur ${remoteResponse.statusCode} persistante après 2 tentatives, abandon.`);
+          if (fatalErrorRetryCount >= 5) {
+            console.error(`Erreur ${remoteResponse.statusCode} persistante après 5 tentatives, abandon.`);
             if (!res.headersSent) {
               res.status(remoteResponse.statusCode).send(`Erreur ${remoteResponse.statusCode} persistante après 2 tentatives.`);
             }
