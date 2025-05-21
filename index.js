@@ -13,6 +13,8 @@ const app = express();
 // Configuration des timeouts
 const TIMEOUT_CONNEXION = 30000; // 30 secondes
 const TIMEOUT_SOCKET = 60000;    // 60 secondes
+const INACTIVITY_TIMEOUT = 20000; // 20 secondes d'inactivité avant de considérer une connexion comme fantôme
+const CLIENT_INACTIVITY_THRESHOLD = 10000; // 10 secondes sans consommation côté client = connexion fantôme
 
 // Clé API pour la sécurité
 const API_KEY = process.env.API_KEY || 'default_key_for_dev';
@@ -88,8 +90,8 @@ function logConnectionsActives() {
   console.log('╠═════════════════════════════════════════════════════╣');
   
   if (connectionsActives.size > 0) {
-    console.log('║ ID │ URL                  │ VITESSE  │ VOLUME   │ DURÉE  ║');
-    console.log('╠════╪══════════════════════╪══════════╪══════════╪════════╣');
+    console.log('║ ID │ URL                  │ VITESSE  │ VOLUME   │ DURÉE  ║ ÉTAT ║');
+    console.log('╠════╪══════════════════════╪══════════╪══════════╪════════╪══════╣');
     
     connectionsActives.forEach((info, id) => {
       // Calculate transmission speed (bytes per second)
@@ -122,12 +124,73 @@ function logConnectionsActives() {
       // Shorten URL if too long
       const shortUrl = info.url.length > 20 ? info.url.substring(0, 17) + '...' : info.url;
       
-      console.log(`║ ${id.toString().padEnd(2)} │ ${shortUrl.padEnd(20)} │ ${vitesseStr.padEnd(8)} │ ${volumeStr.padEnd(8)} │ ${dureeStr.padEnd(6)} ║`);
+      // Calculate status
+      let etats = 'ACTIF';
+      const inactivityTime = now - info.lastActivity;
+      const clientInactivityTime = now - info.lastClientActivity;
+      
+      if (clientInactivityTime > CLIENT_INACTIVITY_THRESHOLD) {
+        etats = 'FANTÔME';
+      } else if (inactivityTime > INACTIVITY_TIMEOUT) {
+        etats = 'STALL';
+      }
+      
+      console.log(`║ ${id.toString().padEnd(2)} │ ${shortUrl.padEnd(20)} │ ${vitesseStr.padEnd(8)} │ ${volumeStr.padEnd(8)} │ ${dureeStr.padEnd(6)} ║ ${etats} ║`);
     });
   } else {
     console.log('║           Aucune connexion active                    ║');
   }
   console.log('╚═════════════════════════════════════════════════════╝');
+}
+
+// Fonction pour nettoyer les connexions fantômes
+function nettoyerConnexionsFantomes() {
+  const now = Date.now();
+  let nbrNettoyees = 0;
+  
+  connectionsActives.forEach((info, id) => {
+    // Cas 1: Détection d'inactivité générale
+    const inactivityTime = now - info.lastActivity;
+    if (inactivityTime > INACTIVITY_TIMEOUT) {
+      console.log(`Connexion inactive (ID: ${id}) détectée après ${Math.floor(inactivityTime/1000)}s, nettoyage...`);
+      if (info.terminerConnexion) {
+        info.terminerConnexion();
+      }
+      connectionsActives.delete(id);
+      nbrNettoyees++;
+      return;
+    }
+    
+    // Cas 2: Le serveur reçoit des données de la source mais le client ne les consomme pas
+    const clientInactivityTime = now - info.lastClientActivity;
+    const serverIsActive = now - info.lastActivity < 5000; // Le serveur a reçu des données récemment
+    
+    if (serverIsActive && clientInactivityTime > CLIENT_INACTIVITY_THRESHOLD) {
+      console.log(`Connexion fantôme (ID: ${id}) détectée: client inactif depuis ${Math.floor(clientInactivityTime/1000)}s mais serveur actif, nettoyage...`);
+      if (info.terminerConnexion) {
+        info.terminerConnexion();
+      }
+      connectionsActives.delete(id);
+      nbrNettoyees++;
+      return;
+    }
+    
+    // Cas 3: Détection de mise en buffer excessive (le client ne consomme pas assez vite)
+    if (info.bufferSize && info.bufferSize > 50 * 1024 * 1024) { // Si buffer > 50MB
+      console.log(`Connexion problématique (ID: ${id}) détectée: buffer excessif (${Math.floor(info.bufferSize/1024/1024)}MB), nettoyage...`);
+      if (info.terminerConnexion) {
+        info.terminerConnexion();
+      }
+      connectionsActives.delete(id);
+      nbrNettoyees++;
+      return;
+    }
+  });
+  
+  if (nbrNettoyees > 0) {
+    console.log(`${nbrNettoyees} connexion(s) problématique(s) nettoyée(s)`);
+    logConnectionsActives();
+  }
 }
 
 // Configuration du serveur pour éviter les fuites de mémoire
@@ -156,7 +219,11 @@ app.get('/url', verifyApiKey, (req, res) => {
   connectionsActives.set(connectionId, {
     url: req.query.url,
     bytesTransmis: 0,
-    startTime: startTime
+    startTime: startTime,
+    lastActivity: startTime,      // Dernière activité côté serveur (réception de données depuis la source)
+    lastClientActivity: startTime, // Dernière activité côté client (envoi réussi au client)
+    bufferSize: 0,                // Taille estimée du buffer
+    terminerConnexion: null       // sera défini plus tard
   });
   
   logConnectionsActives();
@@ -188,7 +255,21 @@ app.get('/url', verifyApiKey, (req, res) => {
     }
   }
 
-  console.log(`Streaming de ${sourceUrl} à partir de l'octet ${clientRangeStart}`);
+  // Détecter si c'est un seek en vérifiant s'il y a des connexions existantes avec la même URL de base
+  let isSeek = false;
+  connectionsActives.forEach((info, id) => {
+    if (id !== connectionId && info.url === baseUrl) {
+      isSeek = true;
+      console.log(`Seeking détecté: nouvelle connexion ${connectionId} pour ${baseUrl}, l'ancienne connexion ${id} sera nettoyée.`);
+      // Si c'est une opération de seeking, marquer les anciennes connexions avec la même URL comme terminées
+      if (info.terminerConnexion) {
+        info.terminerConnexion();
+      }
+      connectionsActives.delete(id);
+    }
+  });
+
+  console.log(`Streaming de ${sourceUrl} à partir de l'octet ${clientRangeStart}${isSeek ? ' (seeking)' : ''}`);
 
   // Variables pour suivre la progression dans le flux
   let bytesTransmis = 0;
@@ -196,6 +277,20 @@ app.get('/url', verifyApiKey, (req, res) => {
   let streamingTermine = false;
   let redirectRetryCount = 0; // Compteur de tentatives sur l'URL de redirection
   let fatalErrorRetryCount = 0; // Compteur pour les erreurs 404 et 503
+  let remoteRequestGlobal = null; // Pour pouvoir l'annuler au besoin
+  let remoteResponseGlobal = null; // Pour pouvoir l'annuler au besoin
+
+  // Définir la fonction de terminaison pour cette connexion
+  connectionsActives.get(connectionId).terminerConnexion = () => {
+    console.log(`Terminaison forcée de la connexion ${connectionId}`);
+    streamingTermine = true;
+    if (remoteRequestGlobal) {
+      remoteRequestGlobal.destroy();
+    }
+    if (remoteResponseGlobal) {
+      remoteResponseGlobal.destroy();
+    }
+  };
 
   /**
    * Fonction qui lance la requête HTTP(S) vers la source à partir d'un offset donné.
@@ -204,6 +299,11 @@ app.get('/url', verifyApiKey, (req, res) => {
    * @param {number} offset - L'octet de départ pour la reprise du flux.
    */
   function lancerRequete(offset) {
+    if (streamingTermine) {
+      console.log(`Tentative de lancer une requête sur une connexion terminée (ID: ${connectionId})`);
+      return;
+    }
+
     console.log(`Lancement de la requête depuis l'octet ${offset}`);
 
     // Si on a dépassé le nombre max de tentatives sur l'URL de redirection, on revient à l'URL de base
@@ -233,6 +333,14 @@ app.get('/url', verifyApiKey, (req, res) => {
 
     // Lancer la requête vers la source
     const remoteRequest = protocol.get(sourceUrl, options, remoteResponse => {
+      remoteRequestGlobal = remoteRequest;
+      remoteResponseGlobal = remoteResponse;
+      
+      // Mettre à jour l'activité côté serveur
+      if (connectionsActives.has(connectionId)) {
+        connectionsActives.get(connectionId).lastActivity = Date.now();
+      }
+      
       // Configurer le timeout pour la réponse distante
       remoteResponse.setTimeout(TIMEOUT_CONNEXION, () => {
         console.log('Timeout de la réponse distante atteint');
@@ -254,8 +362,8 @@ app.get('/url', verifyApiKey, (req, res) => {
         // Gestion spéciale pour les erreurs 404 et 503
         if (remoteResponse.statusCode === 404 || remoteResponse.statusCode === 503) {
           fatalErrorRetryCount++;
-          if (fatalErrorRetryCount >= 5) {
-            console.error(`Erreur ${remoteResponse.statusCode} persistante après 5 tentatives, abandon.`);
+          if (fatalErrorRetryCount >= 2) {
+            console.error(`Erreur ${remoteResponse.statusCode} persistante après 2 tentatives, abandon.`);
             if (!res.headersSent) {
               res.status(remoteResponse.statusCode).send(`Erreur ${remoteResponse.statusCode} persistante après 2 tentatives.`);
             }
@@ -299,21 +407,77 @@ app.get('/url', verifyApiKey, (req, res) => {
           return;
         }
 
+        // Mise à jour de l'heure de dernière activité et des bytes transmis
         bytesTransmis += chunk.length;
+        
         // Mettre à jour les bytes transmis dans le suivi
         if (connectionsActives.has(connectionId)) {
-          connectionsActives.get(connectionId).bytesTransmis = bytesTransmis;
-          connectionsActives.get(connectionId).url = sourceUrl; // Met à jour l'URL en cas de redirection
+          const connexion = connectionsActives.get(connectionId);
+          connexion.bytesTransmis = bytesTransmis;
+          connexion.lastActivity = Date.now();
+          connexion.url = sourceUrl; // Met à jour l'URL en cas de redirection
+          
+          // Augmenter la taille estimée du buffer
+          connexion.bufferSize = (connexion.bufferSize || 0) + chunk.length;
         }
         
         const ok = res.write(chunk);
         if (!ok) {
+          // Le client ne consomme pas assez vite, on doit mettre en pause
           remoteResponse.pause();
-          res.once('drain', () => {
-            if (!streamingTermine) {
-              remoteResponse.resume();
+          
+          // Ajouter un délai de sécurité pour détecter les clients bloqués
+          const pauseTime = Date.now();
+          const pauseCheckInterval = setInterval(() => {
+            if (streamingTermine) {
+              clearInterval(pauseCheckInterval);
+              return;
             }
+            
+            const now = Date.now();
+            const pauseDuration = now - pauseTime;
+            
+            // Si la pause dure trop longtemps, c'est probablement que le client est déconnecté
+            if (pauseDuration > CLIENT_INACTIVITY_THRESHOLD) {
+              console.log(`Pause excessive détectée (${Math.floor(pauseDuration/1000)}s) pour la connexion ${connectionId}, probable déconnexion client`);
+              clearInterval(pauseCheckInterval);
+              
+              // Terminer la connexion
+              streamingTermine = true;
+              remoteResponse.destroy();
+              connectionsActives.delete(connectionId);
+              res.end();
+              return;
+            }
+          }, 1000); // Vérifier toutes les secondes
+          
+          res.once('drain', () => {
+            clearInterval(pauseCheckInterval);
+            
+            if (streamingTermine) {
+              return;
+            }
+            
+            // Le client a consommé les données, on peut reprendre le streaming
+            if (connectionsActives.has(connectionId)) {
+              const connexion = connectionsActives.get(connectionId);
+              connexion.lastClientActivity = Date.now();
+              
+              // Réduire la taille estimée du buffer
+              const connexion = connectionsActives.get(connectionId);
+              connexion.bufferSize = Math.max(0, (connexion.bufferSize || 0) - chunk.length);
+            }
+            
+            remoteResponse.resume();
           });
+        } else {
+          // Le client a consommé les données immédiatement
+          if (connectionsActives.has(connectionId)) {
+            connectionsActives.get(connectionId).lastClientActivity = Date.now();
+            
+            // Pas de buffer accumulé
+            connectionsActives.get(connectionId).bufferSize = 0;
+          }
         }
       });
 
@@ -383,6 +547,9 @@ app.get('/url', verifyApiKey, (req, res) => {
 
 // Afficher périodiquement l'état des connexions
 setInterval(logConnectionsActives, 2000); // Toutes les 2 secondes
+
+// Nettoyer périodiquement les connexions fantômes
+setInterval(nettoyerConnexionsFantomes, 5000); // Toutes les 5 secondes
 
 // Démarrer le serveur sur le port 3000 (ou le port défini dans la variable d'environnement PORT)
 const PORT = process.env.PORT || 3000;
