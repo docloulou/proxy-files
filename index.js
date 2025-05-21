@@ -464,7 +464,6 @@ app.get('/url', verifyApiKey, (req, res) => {
               connexion.lastClientActivity = Date.now();
               
               // Réduire la taille estimée du buffer
-              const connexion = connectionsActives.get(connectionId);
               connexion.bufferSize = Math.max(0, (connexion.bufferSize || 0) - chunk.length);
             }
             
