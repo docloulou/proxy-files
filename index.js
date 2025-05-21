@@ -15,7 +15,7 @@ const TIMEOUT_CONNEXION = 30000; // 30 secondes
 const TIMEOUT_SOCKET = 60000;    // 60 secondes
 const INACTIVITY_TIMEOUT = 20000; // 20 secondes d'inactivité avant de considérer une connexion comme fantôme
 const CLIENT_INACTIVITY_THRESHOLD = 10000; // 10 secondes sans consommation côté client = connexion fantôme
-const SEEKING_GRACE_PERIOD = 5000; // 5 secondes de délai avant de fermer les anciennes connexions lors du seeking
+const SEEKING_GRACE_PERIOD = 3000; // 5 secondes de délai avant de fermer les anciennes connexions lors du seeking
 
 // Clé API pour la sécurité
 const API_KEY = process.env.API_KEY || 'default_key_for_dev';
