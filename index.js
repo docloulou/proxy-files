@@ -15,6 +15,7 @@ const TIMEOUT_CONNEXION = 30000; // 30 secondes
 const TIMEOUT_SOCKET = 60000;    // 60 secondes
 const INACTIVITY_TIMEOUT = 20000; // 20 secondes d'inactivité avant de considérer une connexion comme fantôme
 const CLIENT_INACTIVITY_THRESHOLD = 10000; // 10 secondes sans consommation côté client = connexion fantôme
+const SEEKING_GRACE_PERIOD = 5000; // 5 secondes de délai avant de fermer les anciennes connexions lors du seeking
 
 // Clé API pour la sécurité
 const API_KEY = process.env.API_KEY || 'default_key_for_dev';
@@ -149,15 +150,25 @@ function nettoyerConnexionsFantomes() {
   let nbrNettoyees = 0;
   
   connectionsActives.forEach((info, id) => {
-    // Cas 1: Détection d'inactivité générale
-    const inactivityTime = now - info.lastActivity;
-    if (inactivityTime > INACTIVITY_TIMEOUT) {
-      console.log(`Connexion inactive (ID: ${id}) détectée après ${Math.floor(inactivityTime/1000)}s, nettoyage...`);
+    // Cas 0: Connexion marquée pour une suppression différée
+    if (info.scheduledForDeletion && now >= info.deletionTime) {
+      console.log(`Délai de grâce expiré pour la connexion ${id}, nettoyage...`);
       if (info.terminerConnexion) {
         info.terminerConnexion();
       }
       connectionsActives.delete(id);
       nbrNettoyees++;
+      return;
+    }
+    
+    // Cas 1: Détection d'inactivité générale
+    const inactivityTime = now - info.lastActivity;
+    if (inactivityTime > INACTIVITY_TIMEOUT) {
+      console.log(`Connexion inactive (ID: ${id}) détectée après ${Math.floor(inactivityTime/1000)}s, programmée pour suppression dans ${SEEKING_GRACE_PERIOD/1000}s.`);
+      // Planifier la suppression plutôt que de supprimer immédiatement
+      info.scheduledForDeletion = true;
+      info.deletionTime = now + SEEKING_GRACE_PERIOD;
+      info.url = `${info.url} (suppression dans ${SEEKING_GRACE_PERIOD/1000}s)`;
       return;
     }
     
@@ -166,23 +177,21 @@ function nettoyerConnexionsFantomes() {
     const serverIsActive = now - info.lastActivity < 5000; // Le serveur a reçu des données récemment
     
     if (serverIsActive && clientInactivityTime > CLIENT_INACTIVITY_THRESHOLD) {
-      console.log(`Connexion fantôme (ID: ${id}) détectée: client inactif depuis ${Math.floor(clientInactivityTime/1000)}s mais serveur actif, nettoyage...`);
-      if (info.terminerConnexion) {
-        info.terminerConnexion();
-      }
-      connectionsActives.delete(id);
-      nbrNettoyees++;
+      console.log(`Connexion fantôme (ID: ${id}) détectée: client inactif depuis ${Math.floor(clientInactivityTime/1000)}s mais serveur actif, programmée pour suppression dans ${SEEKING_GRACE_PERIOD/1000}s.`);
+      // Planifier la suppression plutôt que de supprimer immédiatement
+      info.scheduledForDeletion = true;
+      info.deletionTime = now + SEEKING_GRACE_PERIOD;
+      info.url = `${info.url} (suppression dans ${SEEKING_GRACE_PERIOD/1000}s)`;
       return;
     }
     
     // Cas 3: Détection de mise en buffer excessive (le client ne consomme pas assez vite)
     if (info.bufferSize && info.bufferSize > 50 * 1024 * 1024) { // Si buffer > 50MB
-      console.log(`Connexion problématique (ID: ${id}) détectée: buffer excessif (${Math.floor(info.bufferSize/1024/1024)}MB), nettoyage...`);
-      if (info.terminerConnexion) {
-        info.terminerConnexion();
-      }
-      connectionsActives.delete(id);
-      nbrNettoyees++;
+      console.log(`Connexion problématique (ID: ${id}) détectée: buffer excessif (${Math.floor(info.bufferSize/1024/1024)}MB), programmée pour suppression dans ${SEEKING_GRACE_PERIOD/1000}s.`);
+      // Planifier la suppression plutôt que de supprimer immédiatement
+      info.scheduledForDeletion = true;
+      info.deletionTime = now + SEEKING_GRACE_PERIOD;
+      info.url = `${info.url} (suppression dans ${SEEKING_GRACE_PERIOD/1000}s)`;
       return;
     }
   });
@@ -261,12 +270,7 @@ app.get('/url', verifyApiKey, (req, res) => {
   connectionsActives.forEach((info, id) => {
     if (id !== connectionId && info.baseUrl === baseUrl) {
       isSeek = true;
-      console.log(`Seeking détecté: nouvelle connexion ${connectionId} pour ${baseUrl}, l'ancienne connexion ${id} sera nettoyée.`);
-      // Si c'est une opération de seeking, marquer les anciennes connexions avec la même URL comme terminées
-      if (info.terminerConnexion) {
-        info.terminerConnexion();
-      }
-      connectionsActives.delete(id);
+      marquerPourSuppression(id, `seeking (remplacé par ${connectionId})`);
     }
   });
 
@@ -444,11 +448,8 @@ app.get('/url', verifyApiKey, (req, res) => {
               console.log(`Pause excessive détectée (${Math.floor(pauseDuration/1000)}s) pour la connexion ${connectionId}, probable déconnexion client`);
               clearInterval(pauseCheckInterval);
               
-              // Terminer la connexion
-              streamingTermine = true;
-              remoteResponse.destroy();
-              connectionsActives.delete(connectionId);
-              res.end();
+              // Marquer pour suppression différée au lieu de terminer immédiatement
+              marquerPourSuppression(connectionId, "pause excessive");
               return;
             }
           }, 1000); // Vérifier toutes les secondes
@@ -532,13 +533,9 @@ app.get('/url', verifyApiKey, (req, res) => {
 
   // Nettoyer les ressources si le client se déconnecte
   req.on('close', () => {
-    console.log('Client déconnecté, nettoyage des ressources');
-    streamingTermine = true;
-    // Supprimer la connexion du suivi
-    connectionsActives.delete(connectionId);
-    logConnectionsActives();
-    if (!res.headersSent) {
-      res.end();
+    console.log(`Client déconnecté (ID: ${connectionId}), programmation du nettoyage dans ${SEEKING_GRACE_PERIOD/1000}s`);
+    if (connectionsActives.has(connectionId)) {
+      marquerPourSuppression(connectionId, "déconnexion client");
     }
   });
 
@@ -561,3 +558,14 @@ const server = app.listen(PORT, () => {
 // Configurer les timeouts du serveur
 server.keepAliveTimeout = TIMEOUT_CONNEXION;
 server.headersTimeout = TIMEOUT_SOCKET;
+
+// Fonction pour marquer une connexion pour suppression différée
+function marquerPourSuppression(id, raison) {
+  if (connectionsActives.has(id)) {
+    const info = connectionsActives.get(id);
+    info.scheduledForDeletion = true;
+    info.deletionTime = Date.now() + SEEKING_GRACE_PERIOD;
+    info.url = `${info.url} (suppression dans ${SEEKING_GRACE_PERIOD/1000}s: ${raison})`;
+    console.log(`Connexion ${id} programmée pour suppression dans ${SEEKING_GRACE_PERIOD/1000}s (${raison})`);
+  }
+}
