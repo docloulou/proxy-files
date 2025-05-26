@@ -285,6 +285,9 @@ app.get('/url', verifyApiKey, (req, res) => {
   let remoteRequestGlobal = null; // Pour pouvoir l'annuler au besoin
   let remoteResponseGlobal = null; // Pour pouvoir l'annuler au besoin
 
+  let maxRedirects = 50;
+  let maxRetry = 50;
+
   // Définir la fonction de terminaison pour cette connexion
   connectionsActives.get(connectionId).terminerConnexion = () => {
     console.log(`Terminaison forcée de la connexion ${connectionId}`);
@@ -312,7 +315,7 @@ app.get('/url', verifyApiKey, (req, res) => {
     console.log(`Lancement de la requête depuis l'octet ${offset}`);
 
     // Si on a dépassé le nombre max de tentatives sur l'URL de redirection, on revient à l'URL de base
-    if (sourceUrl !== baseUrl && redirectRetryCount >= 10) {
+    if (sourceUrl !== baseUrl && redirectRetryCount >= maxRedirects) {
       console.log('Trop de tentatives sur l\'URL de redirection, retour à l\'URL de base');
       sourceUrl = baseUrl;
       redirectRetryCount = 0;
@@ -367,7 +370,7 @@ app.get('/url', verifyApiKey, (req, res) => {
         // Gestion spéciale pour les erreurs 404 et 503
         if (remoteResponse.statusCode === 404 || remoteResponse.statusCode === 503) {
           fatalErrorRetryCount++;
-          if (fatalErrorRetryCount >= 2) {
+          if (fatalErrorRetryCount >= maxRetry) {
             console.error(`Erreur ${remoteResponse.statusCode} persistante après 2 tentatives, abandon.`);
             if (!res.headersSent) {
               res.status(remoteResponse.statusCode).send(`Erreur ${remoteResponse.statusCode} persistante après 2 tentatives.`);
